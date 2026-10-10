@@ -13,14 +13,14 @@ INSTANCE_NAME = os.getenv("INSTANCE_NAME", "assistant")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PRIMARY_NUMBER = os.getenv("PRIMARY_NUMBER")
 
-# Initialize modern Google GenAI Client
+# Initialize Google GenAI Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-SYSTEM_INSTRUCTION = """You are acting as an Executive Assistant and Proxy for Rilo. You handle incoming queries sent to this WhatsApp number.
+SYSTEM_INSTRUCTION = """You are acting as an Executive Assistant and Proxy. You handle incoming queries sent to this WhatsApp number.
 
 RULES:
 1. Answer routine questions using general knowledge directly.
-2. For scheduling requests, gathering information, or general inquiries, collect details (Name, Purpose) before notifying Rilo.
+2. For scheduling requests, gathering information, or general inquiries, collect details (Name, Purpose) before notifying the owner.
 3. If an issue is URGENT, involves MONEY, or requires DIRECT APPROVAL/DECISION, output [URGENT] at the very beginning of your response.
 """
 
@@ -37,7 +37,7 @@ def send_whatsapp_msg(number, text):
     try:
         requests.post(url, json=payload, headers=headers, timeout=10)
     except Exception as e:
-        print(f"Error sending message: {e}")
+        print(f"Error sending WhatsApp message: {e}")
 
 @app.route("/", methods=["GET"])
 def home():
@@ -47,7 +47,6 @@ def home():
 def webhook():
     data = request.get_json(silent=True) or {}
     
-    # Process only incoming text messages
     event = data.get("event")
     if event != "messages.upsert":
         return jsonify({"status": "ignored_event"}), 200
@@ -55,17 +54,16 @@ def webhook():
     msg_data = data.get("data", {})
     key = msg_data.get("key", {})
     
-    # Do not reply to messages sent by the bot itself
+    # Do not process messages sent by the bot itself
     if key.get("fromMe"):
         return jsonify({"status": "ignored_self"}), 200
 
     remote_jid = key.get("remoteJid", "")
     if "@g.us" in remote_jid:
-        return jsonify({"status": "ignored_group"}), 200  # Ignore group messages
+        return jsonify({"status": "ignored_group"}), 200
         
     sender_number = remote_jid.split("@")[0]
     
-    # Extract text from various message structures
     message_obj = msg_data.get("message", {})
     user_text = (
         message_obj.get("conversation") 
@@ -76,7 +74,6 @@ def webhook():
         return jsonify({"status": "no_text"}), 200
 
     try:
-        # Prompt Gemini using modern SDK syntax
         response = client.models.generate_content(
             model="gemini-1.5-flash",
             contents=f"User Message from {sender_number}: {user_text}",
@@ -90,7 +87,6 @@ def webhook():
         print(f"Gemini API Error: {err}")
         return jsonify({"status": "error_gemini"}), 500
 
-    # Handle Escalation Logic
     if reply_text.startswith("[URGENT]"):
         clean_reply = reply_text.replace("[URGENT]", "").strip()
         send_whatsapp_msg(sender_number, clean_reply)
