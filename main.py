@@ -1,20 +1,20 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 app = Flask(__name__)
 
 # Environment Variables
-EVOLUTION_URL = os.getenv("EVOLUTION_URL")  # e.g., https://evolution-api-9n1n.onrender.com
+EVOLUTION_URL = os.getenv("EVOLUTION_URL", "").rstrip("/")
 EVOLUTION_API_KEY = os.getenv("EVOLUTION_API_KEY")
 INSTANCE_NAME = os.getenv("INSTANCE_NAME", "assistant")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-PRIMARY_NUMBER = os.getenv("PRIMARY_NUMBER")  # e.g., 6281234567890
+PRIMARY_NUMBER = os.getenv("PRIMARY_NUMBER")
 
-# Configure Gemini
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Initialize modern Google GenAI Client
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = """You are acting as an Executive Assistant and Proxy for Rilo. You handle incoming queries sent to this WhatsApp number.
 
@@ -34,44 +34,66 @@ def send_whatsapp_msg(number, text):
         "number": number,
         "text": text
     }
-    requests.post(url, json=payload, headers=headers)
+    try:
+        requests.post(url, json=payload, headers=headers, timeout=10)
+    except Exception as e:
+        print(f"Error sending message: {e}")
+
+@app.route("/", methods=["GET"])
+def home():
+    return "WhatsApp Proxy Backend is Active", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     
     # Process only incoming text messages
-    if not data or data.get("event") != "messages.upsert":
-        return jsonify({"status": "ignored"}), 200
+    event = data.get("event")
+    if event != "messages.upsert":
+        return jsonify({"status": "ignored_event"}), 200
 
     msg_data = data.get("data", {})
     key = msg_data.get("key", {})
     
-    # Ignore messages sent by the bot itself
+    # Do not reply to messages sent by the bot itself
     if key.get("fromMe"):
         return jsonify({"status": "ignored_self"}), 200
 
     remote_jid = key.get("remoteJid", "")
+    if "@g.us" in remote_jid:
+        return jsonify({"status": "ignored_group"}), 200  # Ignore group messages
+        
     sender_number = remote_jid.split("@")[0]
     
-    # Extract message text
-    message_content = msg_data.get("message", {})
-    user_text = message_content.get("conversation") or message_content.get("extendedTextMessage", {}).get("text")
+    # Extract text from various message structures
+    message_obj = msg_data.get("message", {})
+    user_text = (
+        message_obj.get("conversation") 
+        or message_obj.get("extendedTextMessage", {}).get("text")
+    )
     
     if not user_text:
         return jsonify({"status": "no_text"}), 200
 
-    # Prompt Gemini
-    prompt = f"{SYSTEM_INSTRUCTION}\n\nUser Message from {sender_number}: {user_text}"
-    response = model.generate_content(prompt)
-    reply_text = response.text.strip()
+    try:
+        # Prompt Gemini using modern SDK syntax
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=f"User Message from {sender_number}: {user_text}",
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                max_output_tokens=500,
+            ),
+        )
+        reply_text = response.text.strip() if response.text else ""
+    except Exception as err:
+        print(f"Gemini API Error: {err}")
+        return jsonify({"status": "error_gemini"}), 500
 
-    # Check for urgent escalation
+    # Handle Escalation Logic
     if reply_text.startswith("[URGENT]"):
         clean_reply = reply_text.replace("[URGENT]", "").strip()
-        # Reply to sender
         send_whatsapp_msg(sender_number, clean_reply)
-        # Escalate to primary number
         alert_msg = f"🚨 *APPROVAL / ALERT NEEDED*\n*Sender:* +{sender_number}\n*Context:* {user_text}"
         send_whatsapp_msg(PRIMARY_NUMBER, alert_msg)
     else:
@@ -81,4 +103,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-  
